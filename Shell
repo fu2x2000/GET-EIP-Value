@@ -1,0 +1,72 @@
+/ File tester.c
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/mman.h>
+
+// Compile with -m32 -fno-pie
+int main(int argc, char** argv)
+{
+  void* funcm = mmap(NULL, 1000, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
+  strncpy(funcm, argv[1], 100);
+  printf("Function address: %p\n", funcm);
+  void* res = ((void*(*)(void))funcm)();
+  printf("Eip: %p\n", res);
+  return 0;
+}
+
+Simple enough.
+Now, the first appraoch is the relative call. The idea is to call a label, get the EIP from the stack and return to the caller:
+
+bits 32
+
+jmp goofy
+pluto:
+  mov eax, [esp]
+  ret
+goofy:
+  call pluto
+  ret
+
+The result is:
+
+$ ./tester $(python -c 'print "\xeb\x04\x8b\x04\x24\xc3\xe8\xf7\xff\xff\xff\xc3"')
+Function address: 0xf77ca000
+Eip: f77ca00b
+
+Another approach is to issue an absolute call using the simpliest of the ROP gadget: ret. Once returned, the EIP is read from the stack.
+
+$ objdump -d tester | grep ret | head -1
+ 8048356: c3                    ret
+
+bits 32
+
+mov eax, 0x8048356
+call eax
+mov eax, [esp - 4]
+ret
+
+The result is:
+
+$ ./tester $(python -c 'print "\xb8\x56\x83\x04\x08\xff\xd0\x8b\x44\x24\xfc\xc3"')
+Function address: 0xf779d000
+Eip: 0xf779d007
+
+Finally, the last approach uses the Floating point execution environment to get the EIP without performing any call at all. As stated in the IA32 reference, the instruction FNSTENV:
+Saves the current FPU operating environment at the memory location specified with the destination operand, and then masks all floating-point exceptions. The FPU operating environment consists of the FPU control word, status word, tag word, instruction pointer, data pointer, and last opcode.
+The chapter about the FPU environment, states also that the instruction pointer is set to the last floating point operation. Thus, in order to obtain the EIP, the shellcode must invoke a floating point function and save the environment.
+
+bits 32
+
+sub esp, 28
+ftst
+fnstenv [esp]
+mov eax, [esp+0xc]
+add esp, 28
+ret
+
+The result is:
+
+$ ./tester $(python -c 'print "\x83\xec\x1c\xd9\xe4\xd9\x34\x24\x8b\x44\x24\x0c\x83\xc4\x1c\xc3"')
+Function address: 0xf7770000
+Eip: 0xf7770003
